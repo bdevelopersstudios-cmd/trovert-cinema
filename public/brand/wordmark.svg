@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 720 180" width="720" height="180" role="img" aria-label="Trovert Cinema">
+  <style>.s{font-family:"Playfair Display","Didot","Bodoni MT",Georgia,serif;font-style:italic;font-weight:700}</style>
+  <text class="s" x="360" y="76" font-size="72" fill="#F2E4D2" text-anchor="middle">Trovert</text>
+  <g stroke="#B3221F" stroke-width="3" stroke-linecap="round">
+    <path d="M170 96 H300"/><path d="M420 96 H550"/>
+  </g>
+  <g fill="none" stroke="#B3221F" stroke-width="4" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M330 100 v-16 a7 7 0 0 1 7 -7 h14 a7 7 0 0 1 7 7 v16"/>
+    <path d="M366 100 v-16 a7 7 0 0 1 7 -7 h14 a7 7 0 0 1 7 7 v16"/>
+    <path d="M322 100 h76"/>
+  </g>
+  <text class="s" x="360" y="164" font-size="72" fill="#B3221F" text-anchor="middle">Cinema</text>
+</svg>

@@ -1,36 +1,138 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+<div align="center">
+  <img src="public/brand/icon.svg" width="110" alt="Trovert Cinema" />
 
-## Getting Started
+  # Trovert Cinema
 
-First, run the development server:
+  **3D private-cinema seat booking for the Trovert Space home theatre in DHA 5, Lahore.**
+
+  Walk the hall in 3D, tap the recliner you want, pick a slot and a package — plus an
+  admin dashboard to run movies, time slots, pricing, seat holds and bookings.
+</div>
+
+---
+
+## What is in here
+
+- **A real 3D hall.** Eleven powered recliners across three tiered rows, a glowing
+  screen, slat acoustic walls, sconces and step lighting — built from three.js
+  primitives, so there is no model file to download. Click a seat in the hall itself,
+  or use the 2D map beside it.
+- **Three camera views.** Hall, from the seats, and overhead — the camera eases
+  between them.
+- **The screen reacts.** Picking a movie tints the projection glow with that film's
+  accent colour.
+- **Booking rules that hold.** Shared slots go seat by seat; exclusive packages take
+  the whole room and lock every other booking out of that slot. Double-booking a seat
+  is rejected server-side, not just in the UI.
+- **Admin dashboard.** Movies, time slots, packages and pricing, bookings with
+  confirm/cancel, and per-date seat holds for maintenance or walk-ins.
+- **Built for phones.** Leaner geometry and pixel ratio on mobile, one-finger orbit
+  with pinch zoom, 48px seat targets, a sticky total-and-book bar, and no iOS
+  zoom-on-focus.
+
+## Running it
 
 ```bash
+npm install
+cp .env.example .env.local   # then set your own ADMIN_PASSCODE
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open <http://localhost:3000>. The dashboard is at `/admin` — the default passcode is
+`trovert2025` (change it in `.env.local`).
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+| Command | What it does |
+| --- | --- |
+| `npm run dev` | Development server |
+| `npm run build` | Production build |
+| `npm start` | Serve the production build |
+| `npm run lint` | ESLint |
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## The hall
 
-## Learn More
+Eleven seats, laid out to match the real room:
 
-To learn more about Next.js, take a look at the following resources:
+```
+              S C R E E N
+        [A1] [A2] [A3] [A4]      front row, 4
+        [B1] [B2] [B3] [B4]      middle row, 4  (raised)
+          [C1] [C2] [C3]         back row, 3    (raised further)
+```
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+The layout lives in a single file — [`src/lib/seats.ts`](src/lib/seats.ts). Change the
+rows or the spacing there and both the 3D hall and the 2D seat map follow.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Packages
 
-## Deploy on Vercel
+| Package | Price | Guests | Cinema |
+| --- | --- | --- | --- |
+| Shared Slot | Rs. 2,500 / person | 1–11 | Shared |
+| Couple | Rs. 10,000 | 2 | Entire cinema |
+| Group of 4 | Rs. 15,000 | 3–4 | Entire cinema |
+| Group of 6 | Rs. 20,000 | 5–6 | Entire cinema |
+| More than 6 | Rs. 25,000 | 7–11 | Entire cinema |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+All editable from **Admin → Packages**. Ten 2.5-hour slots run around the clock and
+are editable from **Admin → Time slots**.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Wiring up a real database
+
+Right now everything persists to a JSON file at `.data/db.json` (gitignored), seeded
+from [`src/lib/db/seed.ts`](src/lib/db/seed.ts) on first run. **Nothing in the app
+imports that file directly.** Every page and route goes through one interface:
+
+```
+src/lib/db/
+├── repository.ts       ← the CinemaRepository interface (the contract)
+├── json-repository.ts  ← the current file-backed implementation
+├── seed.ts             ← starting content
+└── index.ts            ← picks which implementation to export
+```
+
+To move to Postgres, Supabase, Mongo or Firebase:
+
+1. Write a class that satisfies `CinemaRepository` — e.g. `PrismaRepository`.
+2. Return it from `src/lib/db/index.ts`:
+
+   ```ts
+   export const db: CinemaRepository = process.env.DATABASE_URL
+     ? new PrismaRepository()
+     : new JsonRepository();
+   ```
+
+That is the whole migration. No page, component or API route changes.
+
+## API
+
+| Method | Route | Auth | Purpose |
+| --- | --- | --- | --- |
+| `GET` | `/api/movies` `/api/slots` `/api/packages` `/api/settings` | public | Listings |
+| `GET` | `/api/availability?date=&slotId=` | public | Taken, held and sold-out state |
+| `POST` | `/api/bookings` | public | Create a booking request |
+| `GET` | `/api/bookings` | admin | All bookings |
+| `PATCH` `DELETE` | `/api/bookings/[id]` | admin | Confirm, cancel, delete |
+| `POST` `PATCH` `DELETE` | `/api/movies`, `/api/slots`, `/api/packages/[id]` | admin | Manage content |
+| `GET` `POST` `DELETE` | `/api/blocks` | admin | Hold seats back |
+| `POST` `DELETE` | `/api/admin/session` | — | Sign in / out |
+
+Bookings arrive as `pending`; an admin confirms them once payment is agreed.
+
+## Stack
+
+Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 ·
+three.js with React Three Fiber and drei.
+
+## Brand
+
+The mark follows the Trovert family — a split disc, deep maroon over blush, with a
+projector throwing light across a row of recliners where Trovert Space has clasped
+hands and Trovert Travellers has mountains. Files live in
+[`public/brand/`](public/brand): `logo.svg` (full lockup), `icon.svg` (mark only,
+also the favicon) and `wordmark.svg`.
+
+Palette: maroon `#6E101A` · signal red `#B3221F` · blush `#FBE0E0` ·
+cream `#F2E4D2` · lamp tan `#D9A87C` · hall black `#0B0708`.
+
+---
+
+Built for [@trovertspace](https://instagram.com/trovertspace).

@@ -1,26 +1,163 @@
 @import "tailwindcss";
 
+/* ---------------------------------------------------------------------------
+   Trovert Cinema brand tokens — pulled from the Trovert Space flyers:
+   near-black hall, deep maroon, signal red, warm cream and lamp-glow tan.
+--------------------------------------------------------------------------- */
+@theme {
+  --color-ink: #0b0708;
+  --color-ink-soft: #120d0e;
+  --color-surface: #171110;
+  --color-surface-2: #1f1817;
+  --color-line: #35262a;
+  --color-maroon: #6e101a;
+  --color-maroon-deep: #4a0a11;
+  --color-red: #b3221f;
+  --color-red-bright: #d4342c;
+  --color-cream: #f2e4d2;
+  --color-blush: #fbe0e0;
+  --color-tan: #d9a87c;
+  --color-muted: #a08b82;
+
+  --font-display: var(--font-playfair), Georgia, serif;
+  --font-sans: var(--font-outfit), ui-sans-serif, system-ui, sans-serif;
+
+  --radius-card: 1.1rem;
+}
+
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  color-scheme: dark;
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+html,
+body {
+  background: var(--color-ink);
+  color: var(--color-cream);
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  /* Nothing should ever scroll sideways on a phone. */
+  overflow-x: hidden;
+  overscroll-behavior-y: none;
+}
+
+/* Kill the grey flash and the 300ms delay on taps. */
+button,
+a,
+[role="button"],
+input,
+select,
+textarea,
+label {
+  -webkit-tap-highlight-color: transparent;
+  touch-action: manipulation;
+}
+
+canvas {
+  touch-action: none;
+  display: block;
+}
+
+::selection {
+  background: var(--color-red);
+  color: var(--color-cream);
+}
+
+/* Thin, warm scrollbars so admin tables do not look like a default form. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-line) transparent;
+}
+
+@utility container-page {
+  width: 100%;
+  margin-inline: auto;
+  max-width: 76rem;
+  padding-inline: 1.1rem;
+}
+
+@media (min-width: 640px) {
+  .container-page {
+    padding-inline: 1.5rem;
+  }
+}
+
+/* Horizontal rails (date strip, admin nav) — swipeable, no visible bar. */
+@utility scroll-x {
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+.scroll-x::-webkit-scrollbar {
+  display: none;
+}
+
+/* Faint film-grain + vignette that sits over the whole marketing site. */
+@utility film-grain {
+  position: relative;
+}
+.film-grain::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.35;
+  background-image: radial-gradient(
+    circle at center,
+    transparent 55%,
+    rgba(0, 0, 0, 0.65) 100%
+  );
+}
+
+@utility gold-rule {
+  height: 1px;
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, var(--color-tan) 60%, transparent),
+    transparent
+  );
+}
+
+@keyframes tc-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes tc-flicker {
+  0%,
+  100% {
+    opacity: 0.85;
+  }
+  42% {
+    opacity: 1;
+  }
+  47% {
+    opacity: 0.7;
+  }
+  60% {
+    opacity: 0.95;
+  }
+}
+
+.anim-fade-up {
+  animation: tc-fade-up 0.7s cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.anim-flicker {
+  animation: tc-flicker 5s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .anim-fade-up,
+  .anim-flicker {
+    animation: none;
+  }
 }

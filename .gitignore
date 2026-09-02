@@ -39,3 +39,7 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# local JSON data store (stand-in until the real database is wired up)
+.data/
+!.env.example
