@@ -32,7 +32,8 @@ function buildRow(row: string, count: number, z: number, y: number): SeatDef[] {
       x,
       z,
       y,
-      rotation: -x * 0.045,
+      // Model faces -z (the screen), so a seat left of centre turns right.
+      rotation: x * 0.045,
     };
   });
 }

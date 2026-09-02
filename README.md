@@ -39,7 +39,7 @@ npm run dev
 ```
 
 Open <http://localhost:3000>. The dashboard is at `/admin` — the default passcode is
-`trovert2025` (change it in `.env.local`).
+`1234` (change it in `.env.local`, and in the Vercel dashboard for the live site).
 
 | Command | What it does |
 | --- | --- |

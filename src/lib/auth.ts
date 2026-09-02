@@ -6,8 +6,24 @@
 
 export const ADMIN_COOKIE = "tc_admin";
 
-function passcode(): string {
-  return process.env.ADMIN_PASSCODE ?? "trovert2025";
+/** Convenience passcode for local development only. */
+const DEV_PASSCODE = "1234";
+
+/**
+ * In production the passcode MUST come from the environment.
+ *
+ * This repository is public, so a committed fallback would be a published
+ * password — anyone could read it and sign into the live dashboard. When
+ * ADMIN_PASSCODE is missing in production the gate fails closed: no passcode
+ * is accepted at all, and the sign-in page explains how to set one.
+ */
+export function isAdminConfigured(): boolean {
+  return Boolean(process.env.ADMIN_PASSCODE) || process.env.NODE_ENV !== "production";
+}
+
+function passcode(): string | null {
+  if (process.env.ADMIN_PASSCODE) return process.env.ADMIN_PASSCODE;
+  return process.env.NODE_ENV === "production" ? null : DEV_PASSCODE;
 }
 
 function secret(): string {
@@ -23,15 +39,28 @@ async function sha256(value: string): Promise<string> {
 }
 
 /** The exact cookie value a signed-in admin should be carrying. */
-export function sessionToken(): Promise<string> {
-  return sha256(passcode() + ":" + secret());
+export async function sessionToken(): Promise<string | null> {
+  const code = passcode();
+  return code === null ? null : sha256(code + ":" + secret());
 }
 
 export async function isValidPasscode(input: string): Promise<boolean> {
-  return input.length > 0 && input === passcode();
+  const code = passcode();
+  if (code === null || input.length === 0) return false;
+  return timingSafeEqual(input, code);
 }
 
 export async function isValidSession(token: string | undefined): Promise<boolean> {
   if (!token) return false;
-  return token === (await sessionToken());
+  const expected = await sessionToken();
+  if (expected === null) return false;
+  return timingSafeEqual(token, expected);
+}
+
+/** Constant-time comparison so a wrong guess leaks nothing through timing. */
+function timingSafeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false;
+  let diff = 0;
+  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
+  return diff === 0;
 }

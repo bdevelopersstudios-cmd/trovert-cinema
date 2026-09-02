@@ -11,8 +11,16 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "Wrong passcode" }, { status: 401 });
   }
 
+  const token = await sessionToken();
+  if (token === null) {
+    return NextResponse.json(
+      { error: "Admin access is not configured on this deployment." },
+      { status: 503 },
+    );
+  }
+
   const response = NextResponse.json({ ok: true });
-  response.cookies.set(ADMIN_COOKIE, await sessionToken(), {
+  response.cookies.set(ADMIN_COOKIE, token, {
     httpOnly: true,
     sameSite: "lax",
     secure: process.env.NODE_ENV === "production",

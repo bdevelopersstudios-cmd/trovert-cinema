@@ -1,7 +1,7 @@
 import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 import { cookies } from "next/headers";
-import { ADMIN_COOKIE, isValidSession } from "@/lib/auth";
+import { ADMIN_COOKIE, isAdminConfigured, isValidSession } from "@/lib/auth";
 import { Logo } from "@/components/Logo";
 import { LoginForm } from "@/components/admin/LoginForm";
 
@@ -22,10 +22,21 @@ export default async function LoginPage() {
         <h1 className="text-center font-display text-2xl font-bold text-cream">
           Box office access
         </h1>
-        <p className="mt-2 text-center text-sm text-muted">
-          Enter the admin passcode to manage movies, slots and bookings.
-        </p>
-        <LoginForm />
+
+        {isAdminConfigured() ? (
+          <>
+            <p className="mt-2 text-center text-sm text-muted">
+              Enter the admin passcode to manage movies, slots and bookings.
+            </p>
+            <LoginForm />
+          </>
+        ) : (
+          <p className="mt-4 rounded-xl border border-red/50 bg-red/10 px-4 py-3 text-center text-sm leading-relaxed text-red-bright">
+            Admin access is locked because no{" "}
+            <code className="text-cream">ADMIN_PASSCODE</code> is set on this deployment.
+            Add it as an environment variable and redeploy.
+          </p>
+        )}
       </div>
     </main>
   );

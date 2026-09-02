@@ -14,7 +14,14 @@ import type {
   Slot,
 } from "@/lib/types";
 
-const DB_DIR = path.join(process.cwd(), ".data");
+/**
+ * Where the snapshot lives. A serverless deployment bundle is read-only, but
+ * /tmp is writable, so warm invocations on the same instance still see each
+ * other's writes. Locally it is a gitignored folder in the project.
+ */
+const DB_DIR = process.env.VERCEL
+  ? path.join("/tmp", "trovert-cinema")
+  : path.join(process.cwd(), ".data");
 const DB_FILE = path.join(DB_DIR, "db.json");
 
 /**
@@ -22,10 +29,17 @@ const DB_FILE = path.join(DB_DIR, "db.json");
  * keeps every write path honest so a real database can slot in later.
  * All writes are serialised through `queue` so two requests cannot clobber
  * each other's snapshot.
+ *
+ * If the filesystem turns out to be read-only, the repository keeps serving
+ * from memory rather than failing the request — a booking that cannot be
+ * written to disk is still worth returning to the guest, who is handed a
+ * WhatsApp confirmation link either way.
  */
 export class JsonRepository implements CinemaRepository {
   private cache: Database | null = null;
   private queue: Promise<unknown> = Promise.resolve();
+  /** Flips to false the first time the disk refuses a write. */
+  private persistent = true;
 
   private async read(): Promise<Database> {
     if (this.cache) return this.cache;
@@ -40,9 +54,18 @@ export class JsonRepository implements CinemaRepository {
   }
 
   private async flush(): Promise<void> {
-    if (!this.cache) return;
-    await fs.mkdir(DB_DIR, { recursive: true });
-    await fs.writeFile(DB_FILE, JSON.stringify(this.cache, null, 2), "utf8");
+    if (!this.cache || !this.persistent) return;
+    try {
+      await fs.mkdir(DB_DIR, { recursive: true });
+      await fs.writeFile(DB_FILE, JSON.stringify(this.cache, null, 2), "utf8");
+    } catch (error) {
+      this.persistent = false;
+      console.warn(
+        `[trovert-cinema] Storage is read-only (${DB_DIR}); continuing in memory only. ` +
+          "Data will not survive a restart until a real database is connected.",
+        error,
+      );
+    }
   }
 
   /** Run a mutation against the snapshot, then persist it. */
