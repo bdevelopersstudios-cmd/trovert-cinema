@@ -7,6 +7,8 @@
 
   Walk the hall in 3D, tap the recliner you want, pick a slot and a package — plus an
   admin dashboard to run movies, time slots, pricing, seat holds and bookings.
+
+  ### [trovert-cinema.vercel.app](https://trovert-cinema.vercel.app)
 </div>
 
 ---
@@ -47,6 +49,26 @@ Open <http://localhost:3000>. The dashboard is at `/admin` — the default passc
 | `npm run build` | Production build |
 | `npm start` | Serve the production build |
 | `npm run lint` | ESLint |
+
+## Deploying
+
+The repository is connected to Vercel, so **every push to `main` deploys itself** —
+production lands on [trovert-cinema.vercel.app](https://trovert-cinema.vercel.app).
+
+Two environment variables must be set in the Vercel project (Settings →
+Environment Variables):
+
+| Variable | Why |
+| --- | --- |
+| `ADMIN_PASSCODE` | The dashboard passcode. **Required in production** — this repository is public, so there is deliberately no committed fallback. Without it the admin gate fails closed and the sign-in page says so. |
+| `ADMIN_SECRET` | A long random string used to sign the admin session cookie. |
+
+To deploy by hand instead: `npx vercel deploy --prod`.
+
+> **Bookings do not persist yet.** On serverless each instance keeps its own copy of
+> the JSON store, so a booking can vanish or be invisible to another visitor. Guests
+> are still handed a WhatsApp link with their reference, so the request reaches you.
+> This goes away as soon as a real database is connected — see below.
 
 ## The hall
 
