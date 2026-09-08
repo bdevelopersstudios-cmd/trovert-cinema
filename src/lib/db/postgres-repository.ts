@@ -25,9 +25,13 @@ const globalForPg = globalThis as unknown as { __trovertSql?: postgres.Sql };
 
 /**
  * One pool per process, cached across hot reloads and warm serverless
- * invocations. `max: 1` is deliberate — a serverless instance handles one
- * request at a time, and the provider's own pooler (Neon, Supabase, PgBouncer)
- * is what fans out to real backends.
+ * invocations.
+ *
+ * `max` must be greater than 1. A serverless instance serves one request at a
+ * time, but a single request fans out: every page loads its movies, slots,
+ * packages and settings through `Promise.all`. Squeezed onto one pooled
+ * connection those concurrent queries stall against a transaction-mode pooler
+ * and the page never renders, so the pool needs room for a page's whole fan-out.
  */
 function connect(url: string): postgres.Sql {
   if (globalForPg.__trovertSql) return globalForPg.__trovertSql;
@@ -36,7 +40,7 @@ function connect(url: string): postgres.Sql {
   const declaresSsl = /[?&](sslmode|ssl)=/.test(url);
 
   const sql = postgres(url, {
-    max: Number(process.env.DATABASE_POOL_MAX ?? 1),
+    max: Math.max(2, Number(process.env.DATABASE_POOL_MAX ?? 5)),
     idle_timeout: 20,
     connect_timeout: 15,
     // Transaction-mode poolers reject prepared statements; the queries here are
