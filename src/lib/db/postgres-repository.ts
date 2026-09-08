@@ -27,11 +27,10 @@ const globalForPg = globalThis as unknown as { __trovertSql?: postgres.Sql };
  * One pool per process, cached across hot reloads and warm serverless
  * invocations.
  *
- * `max` must be greater than 1. A serverless instance serves one request at a
- * time, but a single request fans out: every page loads its movies, slots,
- * packages and settings through `Promise.all`. Squeezed onto one pooled
- * connection those concurrent queries stall against a transaction-mode pooler
- * and the page never renders, so the pool needs room for a page's whole fan-out.
+ * `max` sets throughput, not correctness: work beyond it queues, because
+ * `run()` gives every query a connection to itself (see the note there). A
+ * page fans out to four queries, so this leaves room for a request's own
+ * fan-out plus a little headroom.
  */
 function connect(url: string): postgres.Sql {
   if (globalForPg.__trovertSql) return globalForPg.__trovertSql;
@@ -309,6 +308,31 @@ function hash32(value: string): number {
 /** Lock guarding the one-time seed. */
 const SEED_LOCK = [hash32("trovert-cinema"), hash32("seed")] as const;
 
+/**
+ * Bound every wait taken inside a transaction.
+ *
+ * Supabase's pooler silently discards connection-level settings — asking for
+ * these at connect time leaves `lock_timeout` at 0 (wait forever) and
+ * `statement_timeout` at the two-minute default, which is what turned a
+ * contended lock into a two-minute hang. `set local` does survive the pooler
+ * and reverts with the transaction, so it is the one place these can be set.
+ *
+ * Run this first in any transaction that takes a lock.
+ */
+async function boundWaits(tx: Queryable): Promise<void> {
+  await tx`set local lock_timeout = '5s'`;
+  await tx`set local statement_timeout = '15s'`;
+}
+
+/** Postgres codes for "gave up waiting" rather than "the data says no". */
+const LOCK_TIMEOUT = "55P03";
+const QUERY_CANCELED = "57014";
+
+function isTimeout(error: unknown): boolean {
+  const code = (error as { code?: string } | null)?.code;
+  return code === LOCK_TIMEOUT || code === QUERY_CANCELED;
+}
+
 // -------------------------------------------------------------- shared reads
 
 async function readAvailability(
@@ -362,6 +386,30 @@ export class PostgresRepository implements CinemaRepository {
     this.sql = connect(url);
   }
 
+  /**
+   * Run one unit of work on a connection nobody else is using.
+   *
+   * postgres.js will happily pipeline several queries down one connection when
+   * the pool is busy, and Supabase's transaction pooler stalls when it does -
+   * it hands each transaction to a different backend, so pipelined queries
+   * wait on a reply that never comes. Measured against the live pooler, a pool
+   * of 5 served 8 concurrent queries and hung on 12; a pool of 10 hung on 32.
+   * Raising `max` only moves that cliff.
+   *
+   * Reserving means one in-flight query per connection, so surplus work queues
+   * instead of wedging, and `max` becomes a throughput setting rather than a
+   * correctness one. Transactions already get a connection to themselves.
+   */
+  private async run<T>(fn: (sql: Queryable) => Promise<T>): Promise<T> {
+    const pool = await this.ready();
+    const reserved = await pool.reserve();
+    try {
+      return await fn(reserved);
+    } finally {
+      reserved.release();
+    }
+  }
+
   /** Resolves to a connection whose schema and seed content are in place. */
   private ready(): Promise<postgres.Sql> {
     // A failed bootstrap must not stay cached, or one bad connection at boot
@@ -392,6 +440,7 @@ export class PostgresRepository implements CinemaRepository {
     await this.sql.unsafe(SCHEMA_SQL).simple();
 
     await this.sql.begin(async (tx) => {
+      await boundWaits(tx);
       // Two instances provisioning at once must not both seed.
       await tx`select pg_advisory_xact_lock(${SEED_LOCK[0]}, ${SEED_LOCK[1]})`;
       const existing = await tx`select 1 from cinema_settings where id = 1`;
@@ -405,128 +454,143 @@ export class PostgresRepository implements CinemaRepository {
   // ------------------------------------------------------------------ movies
 
   async listMovies(opts?: { activeOnly?: boolean }): Promise<Movie[]> {
-    const sql = await this.ready();
-    const rows = await sql<MovieRow[]>`
-      select * from cinema_movies
-      ${opts?.activeOnly ? sql`where active` : sql``}
-      order by title
-    `;
-    return rows.map(toMovie);
+    return this.run(async (sql) => {
+      const rows = await sql<MovieRow[]>`
+        select * from cinema_movies
+        ${opts?.activeOnly ? sql`where active` : sql``}
+        order by title
+      `;
+      return rows.map(toMovie);
+    });
   }
 
   async getMovie(id: string): Promise<Movie | null> {
-    const sql = await this.ready();
-    const rows = await sql<MovieRow[]>`select * from cinema_movies where id = ${id}`;
-    return rows[0] ? toMovie(rows[0]) : null;
+    return this.run(async (sql) => {
+      const rows = await sql<MovieRow[]>`select * from cinema_movies where id = ${id}`;
+      return rows[0] ? toMovie(rows[0]) : null;
+    });
   }
 
   async createMovie(input: Omit<Movie, "id" | "createdAt">): Promise<Movie> {
-    const sql = await this.ready();
-    const row = { id: newId("mv_"), ...toRow<Movie>(input, MOVIE_COLUMNS) };
-    const rows = await sql<MovieRow[]>`insert into cinema_movies ${sql(row)} returning *`;
-    return toMovie(rows[0]);
+    return this.run(async (sql) => {
+      const row = { id: newId("mv_"), ...toRow<Movie>(input, MOVIE_COLUMNS) };
+      const rows = await sql<MovieRow[]>`insert into cinema_movies ${sql(row)} returning *`;
+      return toMovie(rows[0]);
+    });
   }
 
   async updateMovie(id: string, patch: Partial<Movie>): Promise<Movie | null> {
-    const sql = await this.ready();
-    const row = toRow<Movie>(patch, MOVIE_COLUMNS);
-    const rows = await (Object.keys(row).length === 0
-      ? sql<MovieRow[]>`select * from cinema_movies where id = ${id}`
-      : sql<MovieRow[]>`update cinema_movies set ${sql(row)} where id = ${id} returning *`);
-    return rows[0] ? toMovie(rows[0]) : null;
+    return this.run(async (sql) => {
+      const row = toRow<Movie>(patch, MOVIE_COLUMNS);
+      const rows = await (Object.keys(row).length === 0
+        ? sql<MovieRow[]>`select * from cinema_movies where id = ${id}`
+        : sql<MovieRow[]>`update cinema_movies set ${sql(row)} where id = ${id} returning *`);
+      return rows[0] ? toMovie(rows[0]) : null;
+    });
   }
 
   async deleteMovie(id: string): Promise<boolean> {
-    const sql = await this.ready();
-    const rows = await sql`delete from cinema_movies where id = ${id} returning id`;
-    return rows.length > 0;
+    return this.run(async (sql) => {
+      const rows = await sql`delete from cinema_movies where id = ${id} returning id`;
+      return rows.length > 0;
+    });
   }
 
   // ------------------------------------------------------------------- slots
 
   async listSlots(opts?: { activeOnly?: boolean }): Promise<Slot[]> {
-    const sql = await this.ready();
-    const rows = await sql<SlotRow[]>`
-      select * from cinema_slots
-      ${opts?.activeOnly ? sql`where active` : sql``}
-      order by sort_order
-    `;
-    return rows.map(toSlot);
+    return this.run(async (sql) => {
+      const rows = await sql<SlotRow[]>`
+        select * from cinema_slots
+        ${opts?.activeOnly ? sql`where active` : sql``}
+        order by sort_order
+      `;
+      return rows.map(toSlot);
+    });
   }
 
   async getSlot(id: string): Promise<Slot | null> {
-    const sql = await this.ready();
-    const rows = await sql<SlotRow[]>`select * from cinema_slots where id = ${id}`;
-    return rows[0] ? toSlot(rows[0]) : null;
+    return this.run(async (sql) => {
+      const rows = await sql<SlotRow[]>`select * from cinema_slots where id = ${id}`;
+      return rows[0] ? toSlot(rows[0]) : null;
+    });
   }
 
   async createSlot(input: Omit<Slot, "id">): Promise<Slot> {
-    const sql = await this.ready();
-    const row = { id: newId("sl_"), ...toRow<Slot>(input, SLOT_COLUMNS) };
-    const rows = await sql<SlotRow[]>`insert into cinema_slots ${sql(row)} returning *`;
-    return toSlot(rows[0]);
+    return this.run(async (sql) => {
+      const row = { id: newId("sl_"), ...toRow<Slot>(input, SLOT_COLUMNS) };
+      const rows = await sql<SlotRow[]>`insert into cinema_slots ${sql(row)} returning *`;
+      return toSlot(rows[0]);
+    });
   }
 
   async updateSlot(id: string, patch: Partial<Slot>): Promise<Slot | null> {
-    const sql = await this.ready();
-    const row = toRow<Slot>(patch, SLOT_COLUMNS);
-    const rows = await (Object.keys(row).length === 0
-      ? sql<SlotRow[]>`select * from cinema_slots where id = ${id}`
-      : sql<SlotRow[]>`update cinema_slots set ${sql(row)} where id = ${id} returning *`);
-    return rows[0] ? toSlot(rows[0]) : null;
+    return this.run(async (sql) => {
+      const row = toRow<Slot>(patch, SLOT_COLUMNS);
+      const rows = await (Object.keys(row).length === 0
+        ? sql<SlotRow[]>`select * from cinema_slots where id = ${id}`
+        : sql<SlotRow[]>`update cinema_slots set ${sql(row)} where id = ${id} returning *`);
+      return rows[0] ? toSlot(rows[0]) : null;
+    });
   }
 
   async deleteSlot(id: string): Promise<boolean> {
-    const sql = await this.ready();
-    const rows = await sql`delete from cinema_slots where id = ${id} returning id`;
-    return rows.length > 0;
+    return this.run(async (sql) => {
+      const rows = await sql`delete from cinema_slots where id = ${id} returning id`;
+      return rows.length > 0;
+    });
   }
 
   // ---------------------------------------------------------------- packages
 
   async listPackages(opts?: { activeOnly?: boolean }): Promise<Package[]> {
-    const sql = await this.ready();
-    const rows = await sql<PackageRow[]>`
-      select * from cinema_packages
-      ${opts?.activeOnly ? sql`where active` : sql``}
-      order by sort_order
-    `;
-    return rows.map(toPackage);
+    return this.run(async (sql) => {
+      const rows = await sql<PackageRow[]>`
+        select * from cinema_packages
+        ${opts?.activeOnly ? sql`where active` : sql``}
+        order by sort_order
+      `;
+      return rows.map(toPackage);
+    });
   }
 
   async getPackage(id: string): Promise<Package | null> {
-    const sql = await this.ready();
-    const rows = await sql<PackageRow[]>`select * from cinema_packages where id = ${id}`;
-    return rows[0] ? toPackage(rows[0]) : null;
+    return this.run(async (sql) => {
+      const rows = await sql<PackageRow[]>`select * from cinema_packages where id = ${id}`;
+      return rows[0] ? toPackage(rows[0]) : null;
+    });
   }
 
   async updatePackage(id: string, patch: Partial<Package>): Promise<Package | null> {
-    const sql = await this.ready();
-    const row = toRow<Package>(patch, PACKAGE_COLUMNS);
-    const rows = await (Object.keys(row).length === 0
-      ? sql<PackageRow[]>`select * from cinema_packages where id = ${id}`
-      : sql<PackageRow[]>`update cinema_packages set ${sql(row)} where id = ${id} returning *`);
-    return rows[0] ? toPackage(rows[0]) : null;
+    return this.run(async (sql) => {
+      const row = toRow<Package>(patch, PACKAGE_COLUMNS);
+      const rows = await (Object.keys(row).length === 0
+        ? sql<PackageRow[]>`select * from cinema_packages where id = ${id}`
+        : sql<PackageRow[]>`update cinema_packages set ${sql(row)} where id = ${id} returning *`);
+      return rows[0] ? toPackage(rows[0]) : null;
+    });
   }
 
   // ---------------------------------------------------------------- bookings
 
   async listBookings(filter?: { date?: string; slotId?: string }): Promise<Booking[]> {
-    const sql = await this.ready();
-    const rows = await sql<BookingRow[]>`
-      select * from cinema_bookings
-      where true
-        ${filter?.date ? sql`and date = ${filter.date}` : sql``}
-        ${filter?.slotId ? sql`and slot_id = ${filter.slotId}` : sql``}
-      order by date desc, created_at desc
-    `;
-    return rows.map(toBooking);
+    return this.run(async (sql) => {
+      const rows = await sql<BookingRow[]>`
+        select * from cinema_bookings
+        where true
+          ${filter?.date ? sql`and date = ${filter.date}` : sql``}
+          ${filter?.slotId ? sql`and slot_id = ${filter.slotId}` : sql``}
+        order by date desc, created_at desc
+      `;
+      return rows.map(toBooking);
+    });
   }
 
   async getBooking(id: string): Promise<Booking | null> {
-    const sql = await this.ready();
-    const rows = await sql<BookingRow[]>`select * from cinema_bookings where id = ${id}`;
-    return rows[0] ? toBooking(rows[0]) : null;
+    return this.run(async (sql) => {
+      const rows = await sql<BookingRow[]>`select * from cinema_bookings where id = ${id}`;
+      return rows[0] ? toBooking(rows[0]) : null;
+    });
   }
 
   /**
@@ -539,7 +603,27 @@ export class PostgresRepository implements CinemaRepository {
   async createBooking(input: Omit<Booking, "id" | "ref" | "createdAt">): Promise<Booking> {
     const sql = await this.ready();
 
+    try {
+      return await this.insertBooking(sql, input);
+    } catch (error) {
+      // Waiting for the slot's lock is bounded, so a serverless instance frozen
+      // mid-booking cannot wedge a showing. Whoever times out is told to retry
+      // rather than being handed a 500.
+      if (isTimeout(error)) {
+        throw new BookingConflictError(
+          "Someone else is booking this slot right now, please try again",
+        );
+      }
+      throw error;
+    }
+  }
+
+  private insertBooking(
+    sql: postgres.Sql,
+    input: Omit<Booking, "id" | "ref" | "createdAt">,
+  ): Promise<Booking> {
     return sql.begin(async (tx) => {
+      await boundWaits(tx);
       await tx`select pg_advisory_xact_lock(${hash32(input.date)}, ${hash32(input.slotId)})`;
 
       const availability = await readAvailability(tx, input.date, input.slotId);
@@ -581,73 +665,81 @@ export class PostgresRepository implements CinemaRepository {
   }
 
   async updateBooking(id: string, patch: Partial<Booking>): Promise<Booking | null> {
-    const sql = await this.ready();
-    const row = toRow<Booking>(patch, BOOKING_COLUMNS);
-    const rows = await (Object.keys(row).length === 0
-      ? sql<BookingRow[]>`select * from cinema_bookings where id = ${id}`
-      : sql<BookingRow[]>`update cinema_bookings set ${sql(row)} where id = ${id} returning *`);
-    return rows[0] ? toBooking(rows[0]) : null;
+    return this.run(async (sql) => {
+      const row = toRow<Booking>(patch, BOOKING_COLUMNS);
+      const rows = await (Object.keys(row).length === 0
+        ? sql<BookingRow[]>`select * from cinema_bookings where id = ${id}`
+        : sql<BookingRow[]>`update cinema_bookings set ${sql(row)} where id = ${id} returning *`);
+      return rows[0] ? toBooking(rows[0]) : null;
+    });
   }
 
   async deleteBooking(id: string): Promise<boolean> {
-    const sql = await this.ready();
-    const rows = await sql`delete from cinema_bookings where id = ${id} returning id`;
-    return rows.length > 0;
+    return this.run(async (sql) => {
+      const rows = await sql`delete from cinema_bookings where id = ${id} returning id`;
+      return rows.length > 0;
+    });
   }
 
   // ------------------------------------------------------------------ blocks
 
   async listBlocks(filter?: { date?: string; slotId?: string }): Promise<SeatBlock[]> {
-    const sql = await this.ready();
-    const rows = await sql<SeatBlockRow[]>`
-      select * from cinema_seat_blocks
-      where true
-        ${filter?.date ? sql`and date = ${filter.date}` : sql``}
-        ${filter?.slotId ? sql`and slot_id = ${filter.slotId}` : sql``}
-      order by created_at desc
-    `;
-    return rows.map(toBlock);
+    return this.run(async (sql) => {
+      const rows = await sql<SeatBlockRow[]>`
+        select * from cinema_seat_blocks
+        where true
+          ${filter?.date ? sql`and date = ${filter.date}` : sql``}
+          ${filter?.slotId ? sql`and slot_id = ${filter.slotId}` : sql``}
+        order by created_at desc
+      `;
+      return rows.map(toBlock);
+    });
   }
 
   async createBlock(input: Omit<SeatBlock, "id" | "createdAt">): Promise<SeatBlock> {
-    const sql = await this.ready();
-    const row = { id: newId("bl_"), ...toRow<SeatBlock>(input, BLOCK_COLUMNS) };
-    const rows = await sql<SeatBlockRow[]>`
-      insert into cinema_seat_blocks ${sql(row)} returning *
-    `;
-    return toBlock(rows[0]);
+    return this.run(async (sql) => {
+      const row = { id: newId("bl_"), ...toRow<SeatBlock>(input, BLOCK_COLUMNS) };
+      const rows = await sql<SeatBlockRow[]>`
+        insert into cinema_seat_blocks ${sql(row)} returning *
+      `;
+      return toBlock(rows[0]);
+    });
   }
 
   async deleteBlock(id: string): Promise<boolean> {
-    const sql = await this.ready();
-    const rows = await sql`delete from cinema_seat_blocks where id = ${id} returning id`;
-    return rows.length > 0;
+    return this.run(async (sql) => {
+      const rows = await sql`delete from cinema_seat_blocks where id = ${id} returning id`;
+      return rows.length > 0;
+    });
   }
 
   // ----------------------------------------------------------------- derived
 
   async getAvailability(date: string, slotId: string): Promise<Availability> {
-    const sql = await this.ready();
-    return readAvailability(sql, date, slotId);
+    return this.run(async (sql) => {
+      return readAvailability(sql, date, slotId);
+    });
   }
 
   // ---------------------------------------------------------------- settings
 
   async getSettings(): Promise<Settings> {
-    const sql = await this.ready();
-    const rows = await sql<SettingsRow[]>`select * from cinema_settings where id = 1`;
-    return rows[0] ? toSettings(rows[0]) : seedDatabase.settings;
+    return this.run(async (sql) => {
+      const rows = await sql<SettingsRow[]>`select * from cinema_settings where id = 1`;
+      return rows[0] ? toSettings(rows[0]) : seedDatabase.settings;
+    });
   }
 
   async updateSettings(patch: Partial<Settings>): Promise<Settings> {
-    const sql = await this.ready();
-    const row = toRow<Settings>(patch, SETTINGS_COLUMNS);
-    if (Object.keys(row).length === 0) return this.getSettings();
+    return this.run(async (sql) => {
+      const row = toRow<Settings>(patch, SETTINGS_COLUMNS);
+      if (Object.keys(row).length === 0) return this.getSettings();
 
-    const rows = await sql<SettingsRow[]>`
-      update cinema_settings set ${sql(row)} where id = 1 returning *
-    `;
-    return rows[0] ? toSettings(rows[0]) : this.getSettings();
+      const rows = await sql<SettingsRow[]>`
+        update cinema_settings set ${sql(row)} where id = 1 returning *
+      `;
+      return rows[0] ? toSettings(rows[0]) : this.getSettings();
+    });
   }
 }
 

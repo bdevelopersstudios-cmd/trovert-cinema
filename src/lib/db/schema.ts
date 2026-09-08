@@ -11,6 +11,13 @@
  * and nothing has to reason about the server's timezone.
  */
 export const SCHEMA_SQL = `
+-- Multiple statements in one simple query run as a single implicit
+-- transaction, so SET LOCAL covers everything below and reverts with it.
+-- Creating a table takes locks; bound the wait rather than letting a cold
+-- start queue behind another instance for the pooler's two-minute default.
+set local lock_timeout = '5s';
+set local statement_timeout = '30s';
+
 create table if not exists cinema_movies (
   id            text primary key,
   title         text not null,
