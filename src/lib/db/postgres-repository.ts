@@ -431,7 +431,7 @@ export class PostgresRepository implements CinemaRepository {
     // start behind it until its connection timed out. Once the tables exist, no
     // request should go near it.
     try {
-      const provisioned = await this.sql`select 1 from cinema_settings where id = 1`;
+      const provisioned = await this.sql`select 1 from cinema_meta where "key" = 'provisioned'`;
       if (provisioned.length > 0) return this.sql;
     } catch {
       // Tables are not there yet; create them below.
@@ -443,9 +443,29 @@ export class PostgresRepository implements CinemaRepository {
       await boundWaits(tx);
       // Two instances provisioning at once must not both seed.
       await tx`select pg_advisory_xact_lock(${SEED_LOCK[0]}, ${SEED_LOCK[1]})`;
-      const existing = await tx`select 1 from cinema_settings where id = 1`;
-      if (existing.length > 0) return;
-      await seed(tx);
+
+      const already = await tx`select 1 from cinema_meta where "key" = 'provisioned'`;
+      if (already.length > 0) return;
+
+      // Seed a genuinely empty database only. A database that already holds
+      // content keeps it — including one an admin has deliberately emptied down
+      // to, say, just the packages. Re-seeding there would undo a deletion
+      // somebody meant, and quietly put sample films back on a real cinema.
+      const [{ rows }] = await tx<{ rows: number }[]>`
+        select (
+          (select count(*) from cinema_movies) +
+          (select count(*) from cinema_slots) +
+          (select count(*) from cinema_packages) +
+          (select count(*) from cinema_settings)
+        )::int as rows
+      `;
+      if (rows === 0) await seed(tx);
+
+      await tx`
+        insert into cinema_meta ("key", value)
+        values ('provisioned', ${new Date().toISOString()})
+        on conflict ("key") do nothing
+      `;
     });
 
     return this.sql;
@@ -734,6 +754,10 @@ export class PostgresRepository implements CinemaRepository {
     return this.run(async (sql) => {
       const row = toRow<Settings>(patch, SETTINGS_COLUMNS);
       if (Object.keys(row).length === 0) return this.getSettings();
+
+      // The row can be absent — an admin may have cleared the table — and an
+      // update against nothing would report success while saving nothing.
+      await sql`insert into cinema_settings (id) values (1) on conflict (id) do nothing`;
 
       const rows = await sql<SettingsRow[]>`
         update cinema_settings set ${sql(row)} where id = 1 returning *

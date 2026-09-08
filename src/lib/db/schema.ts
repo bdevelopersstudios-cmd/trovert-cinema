@@ -94,6 +94,16 @@ create table if not exists cinema_seat_blocks (
 create index if not exists cinema_seat_blocks_slot_idx
   on cinema_seat_blocks (date, slot_id);
 
+-- Records that this database has been set up, separately from whether it
+-- currently holds any content. Seeding keys off this rather than off the
+-- content itself, so an operator who deliberately empties the cinema does not
+-- find the sample movies and slots back after the next cold start.
+create table if not exists cinema_meta (
+  key        text primary key,
+  value      text not null default '',
+  updated_at timestamptz not null default now()
+);
+
 create table if not exists cinema_settings (
   id            integer primary key check (id = 1),
   venue_note    text not null default '',
