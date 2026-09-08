@@ -49,6 +49,12 @@ Open <http://localhost:3000>. The dashboard is at `/admin` — the default passc
 | `npm run build` | Production build |
 | `npm start` | Serve the production build |
 | `npm run lint` | ESLint |
+| `npm run smoke` | Smoke-test a running site — pages, API, auth and concurrency |
+
+Point the smoke test at a deployment with `npm run smoke -- https://trovert-cinema.vercel.app`.
+It is read-only and creates no bookings. Run it after any change to the database
+layer: it checks **pages** under **concurrent load** with a **time limit**, which is
+where two production bugs hid while every single-request API check stayed green.
 
 ## Deploying
 
@@ -142,6 +148,23 @@ src/lib/db/
 
 Tables are prefixed `cinema_` (`cinema_movies`, `cinema_bookings`, …) so the app can
 share a database with other things.
+
+### Two rules the database layer has to keep
+
+Both were learned the hard way, and both are invisible to single-request checks.
+
+**Every query gets a connection to itself.** postgres.js will pipeline several
+queries down one connection when the pool is busy, and a transaction-mode pooler
+stalls when it does — it hands each transaction to a different backend, so the
+pipelined queries wait on a reply that never arrives. Against the live pooler a
+pool of 5 served 8 concurrent queries and hung on 12; a pool of 10 hung on 32.
+`run()` reserves a connection per unit of work, so surplus work queues instead of
+wedging and `DATABASE_POOL_MAX` is a throughput setting, not a correctness one.
+
+**Nothing waits forever.** Supabase's pooler silently discards connection-level
+settings, so `lock_timeout` stays at 0 and `statement_timeout` at two minutes —
+which is exactly how long a contended lock used to hang. `SET LOCAL` does survive
+the pooler, so every transaction that takes a lock bounds its own waits first.
 
 ### Double-booking
 
