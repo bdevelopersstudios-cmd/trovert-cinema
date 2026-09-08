@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { db } from "@/lib/db";
+import { db, isBookingConflict } from "@/lib/db";
 import { requireAdmin, badRequest } from "../_guard";
 import { SEAT_IDS, TOTAL_SEATS } from "@/lib/seats";
 import type { Booking } from "@/lib/types";
@@ -66,20 +66,28 @@ export async function POST(request: Request) {
   const clash = seatIds.filter((id) => unavailable.has(id));
   if (clash.length > 0) return badRequest(`Seat ${clash.join(", ")} was just taken`);
 
-  const booking = await db.createBooking({
-    customerName: customerName.trim(),
-    phone: phone.trim(),
-    email: body.email?.trim() ?? "",
-    date,
-    slotId,
-    movieId: body.movieId ?? null,
-    packageId,
-    seatIds: pkg.exclusive && seatIds.length === 0 ? SEAT_IDS : seatIds,
-    guests,
-    amount: pkg.exclusive ? pkg.price : pkg.price * guests,
-    status: "pending",
-    notes: body.notes?.trim() ?? "",
-  });
+  // The checks above race: two guests can both pass them before either writes.
+  // The repository re-runs them inside the write transaction and rejects the
+  // loser, which arrives here as a conflict rather than a seat booked twice.
+  try {
+    const booking = await db.createBooking({
+      customerName: customerName.trim(),
+      phone: phone.trim(),
+      email: body.email?.trim() ?? "",
+      date,
+      slotId,
+      movieId: body.movieId ?? null,
+      packageId,
+      seatIds: pkg.exclusive && seatIds.length === 0 ? SEAT_IDS : seatIds,
+      guests,
+      amount: pkg.exclusive ? pkg.price : pkg.price * guests,
+      status: "pending",
+      notes: body.notes?.trim() ?? "",
+    });
 
-  return NextResponse.json(booking, { status: 201 });
+    return NextResponse.json(booking, { status: 201 });
+  } catch (error) {
+    if (isBookingConflict(error)) return badRequest(error.message);
+    throw error;
+  }
 }
