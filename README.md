@@ -62,13 +62,15 @@ Environment Variables):
 | --- | --- |
 | `ADMIN_PASSCODE` | The dashboard passcode. **Required in production** — this repository is public, so there is deliberately no committed fallback. Without it the admin gate fails closed and the sign-in page says so. |
 | `ADMIN_SECRET` | A long random string used to sign the admin session cookie. |
+| `DATABASE_URL` | Postgres connection string. **Required in production** — without it bookings do not survive, see below. |
 
 To deploy by hand instead: `npx vercel deploy --prod`.
 
-> **Bookings do not persist yet.** On serverless each instance keeps its own copy of
-> the JSON store, so a booking can vanish or be invisible to another visitor. Guests
-> are still handed a WhatsApp link with their reference, so the request reaches you.
-> This goes away as soon as a real database is connected — see below.
+> **Set `DATABASE_URL` in production.** With it, bookings live in Postgres and every
+> instance sees the same ones. Without it the app falls back to a per-instance JSON
+> file, where a booking can vanish or be invisible to another visitor — fine for
+> local development, not for the live site. See
+> [Wiring up the database](#wiring-up-the-database).
 
 ## The hall
 
@@ -97,32 +99,58 @@ rows or the spacing there and both the 3D hall and the 2D seat map follow.
 All editable from **Admin → Packages**. Ten 2.5-hour slots run around the clock and
 are editable from **Admin → Time slots**.
 
-## Wiring up a real database
+## Wiring up the database
 
-Right now everything persists to a JSON file at `.data/db.json` (gitignored), seeded
-from [`src/lib/db/seed.ts`](src/lib/db/seed.ts) on first run. **Nothing in the app
-imports that file directly.** Every page and route goes through one interface:
+The app stores everything in **Postgres**. Set one environment variable:
+
+```bash
+DATABASE_URL=postgresql://user:password@host:5432/dbname
+```
+
+That is the whole setup. On the first request the app creates its tables and seeds
+the movies, slots, packages and settings — there is no migration or seed command to
+run, and pointing it at an empty database is enough.
+
+Any Postgres works, because the app speaks plain SQL rather than a vendor SDK:
+
+| Provider | Where the connection string lives |
+| --- | --- |
+| **Supabase** | Project settings → Database → Connection string → URI. Use the **transaction pooler** (port `6543`) on Vercel. |
+| **Neon** | Dashboard → Connection details → pooled connection string. |
+| **Vercel Postgres** | Added to the project automatically as `DATABASE_URL`. |
+| **Local** | `postgresql://postgres:postgres@localhost:5432/trovert` |
+
+Leave `DATABASE_URL` unset and the app falls back to a JSON file at `.data/db.json`
+(gitignored), so `npm run dev` works with no database installed. That fallback is for
+development only — on serverless each instance keeps its own copy.
+
+### How it fits together
+
+**Nothing in the app imports a concrete store.** Every page and route goes through one
+interface, so the two implementations are interchangeable:
 
 ```
 src/lib/db/
-├── repository.ts       ← the CinemaRepository interface (the contract)
-├── json-repository.ts  ← the current file-backed implementation
-├── seed.ts             ← starting content
-└── index.ts            ← picks which implementation to export
+├── repository.ts           ← the CinemaRepository interface (the contract)
+├── postgres-repository.ts  ← Postgres, used when DATABASE_URL is set
+├── json-repository.ts      ← file-backed fallback for local development
+├── schema.ts               ← the SQL schema, applied on first use
+├── errors.ts               ← BookingConflictError
+├── seed.ts                 ← starting content, shared by both
+└── index.ts                ← picks which implementation to export
 ```
 
-To move to Postgres, Supabase, Mongo or Firebase:
+Tables are prefixed `cinema_` (`cinema_movies`, `cinema_bookings`, …) so the app can
+share a database with other things.
 
-1. Write a class that satisfies `CinemaRepository` — e.g. `PrismaRepository`.
-2. Return it from `src/lib/db/index.ts`:
+### Double-booking
 
-   ```ts
-   export const db: CinemaRepository = process.env.DATABASE_URL
-     ? new PrismaRepository()
-     : new JsonRepository();
-   ```
-
-That is the whole migration. No page, component or API route changes.
+A seat cannot be sold twice, even under a race. `POST /api/bookings` checks
+availability before it writes, but two guests can both pass that check in the same
+instant — so `createBooking` re-runs the check *inside* its write transaction, behind
+a Postgres advisory lock on the date and slot. Attempts on the same showing queue up,
+and the loser gets a `BookingConflictError` that the route turns into the same
+friendly `400` as the pre-flight check. One booking is written, never two.
 
 ## API
 
@@ -141,7 +169,7 @@ Bookings arrive as `pending`; an admin confirms them once payment is agreed.
 
 ## Stack
 
-Next.js 16 (App Router) · React 19 · TypeScript · Tailwind CSS v4 ·
+Next.js 16 (App Router) · React 19 · TypeScript · Postgres · Tailwind CSS v4 ·
 three.js with React Three Fiber and drei.
 
 ## Brand
