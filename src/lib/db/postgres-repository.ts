@@ -374,10 +374,25 @@ export class PostgresRepository implements CinemaRepository {
   }
 
   private async bootstrap(): Promise<postgres.Sql> {
+    // Fast path, and the one that runs almost every time: a single round trip
+    // to confirm the database is already provisioned.
+    //
+    // Provisioning below takes a global advisory lock, and serverless instances
+    // are frozen and discarded constantly. If every cold start reached for that
+    // lock, one instance frozen mid-transaction would stall every other cold
+    // start behind it until its connection timed out. Once the tables exist, no
+    // request should go near it.
+    try {
+      const provisioned = await this.sql`select 1 from cinema_settings where id = 1`;
+      if (provisioned.length > 0) return this.sql;
+    } catch {
+      // Tables are not there yet; create them below.
+    }
+
     await this.sql.unsafe(SCHEMA_SQL).simple();
 
     await this.sql.begin(async (tx) => {
-      // Two instances booting at once must not both seed.
+      // Two instances provisioning at once must not both seed.
       await tx`select pg_advisory_xact_lock(${SEED_LOCK[0]}, ${SEED_LOCK[1]})`;
       const existing = await tx`select 1 from cinema_settings where id = 1`;
       if (existing.length > 0) return;
